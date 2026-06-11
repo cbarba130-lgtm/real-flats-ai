@@ -62,8 +62,21 @@ with st.sidebar:
         value=True
     )
 
-    min_stroke = st.slider("Minimum stroke weight", 0.25, 3.0, 0.5, 0.05)
-    max_stroke = st.slider("Maximum stroke weight", 0.5, 8.0, 3.0, 0.05)
+    min_stroke = st.slider(
+        "Minimum stroke weight",
+        0.25,
+        3.0,
+        0.5,
+        0.05
+    )
+
+    max_stroke = st.slider(
+        "Maximum stroke weight",
+        0.5,
+        8.0,
+        3.0,
+        0.05
+    )
 
     remove_texture_details = st.checkbox(
         "Remove texture details",
@@ -118,6 +131,7 @@ def preprocess(img, threshold_mode, manual_threshold, speck_area):
 
         for i in range(1, num_labels):
             area = stats[i, cv2.CC_STAT_AREA]
+
             if area >= speck_area:
                 cleaned[labels == i] = 255
 
@@ -126,7 +140,13 @@ def preprocess(img, threshold_mode, manual_threshold, speck_area):
     return bw
 
 
-def estimate_stroke_weight(point, distance_map, min_stroke, max_stroke, preserve=True):
+def estimate_stroke_weight(
+    point,
+    distance_map,
+    min_stroke,
+    max_stroke,
+    preserve=True
+):
     if not preserve:
         return (min_stroke + max_stroke) / 2
 
@@ -205,16 +225,22 @@ def build_svg(
 
     svg_io = StringIO()
 
-dwg = svgwrite.Drawing(
-    svg_io,
-    size=(width, height),
-    viewBox=f"0 0 {width} {height}",
-    profile="tiny"
+    dwg = svgwrite.Drawing(
+        svg_io,
+        size=(width, height),
+        viewBox=f"0 0 {width} {height}",
+        profile="tiny"
     )
 
     if include_preview_layer:
         bg = dwg.g(id="White_Background")
-        bg.add(dwg.rect(insert=(0, 0), size=(width, height), fill="white"))
+        bg.add(
+            dwg.rect(
+                insert=(0, 0),
+                size=(width, height),
+                fill="white"
+            )
+        )
         dwg.add(bg)
 
     def add_contours_to_group(group, contour_list):
@@ -223,7 +249,10 @@ dwg = svgwrite.Drawing(
                 continue
 
             if smoothness > 0:
-                epsilon = (smoothness / 100.0) * cv2.arcLength(contour, False)
+                epsilon = (smoothness / 100.0) * cv2.arcLength(
+                    contour,
+                    False
+                )
                 approx = cv2.approxPolyDP(contour, epsilon, False)
             else:
                 approx = contour
@@ -248,14 +277,16 @@ dwg = svgwrite.Drawing(
                 preserve_line_weights
             )
 
-            group.add(dwg.path(
-                d=path_data,
-                fill="none",
-                stroke="black",
-                stroke_width=stroke_width,
-                stroke_linecap="round",
-                stroke_linejoin="round"
-            ))
+            group.add(
+                dwg.path(
+                    d=path_data,
+                    fill="none",
+                    stroke="black",
+                    stroke_width=stroke_width,
+                    stroke_linecap="round",
+                    stroke_linejoin="round"
+                )
+            )
 
     if separate_front_back:
         front, back, center = split_front_back_groups(contours, width)
@@ -281,10 +312,10 @@ dwg = svgwrite.Drawing(
 
     dwg.write(svg_io)
 
-svg_text = svg_io.getvalue()
-svg_bytes = svg_text.encode("utf-8")
+    svg_text = svg_io.getvalue()
+    svg_bytes = svg_text.encode("utf-8")
 
-return svg_bytes, skeleton_u8
+    return svg_bytes, skeleton_u8
 
 
 if uploaded_file:
