@@ -4,7 +4,7 @@ import numpy as np
 import svgwrite
 from skimage.morphology import skeletonize
 from scipy.ndimage import distance_transform_edt
-from io import BytesIO
+from io import BytesIO, StringIO
 from PIL import Image
 
 APP_NAME = "Real Flats AI"
@@ -203,13 +203,13 @@ def build_svg(
         cv2.CHAIN_APPROX_NONE
     )
 
-    svg_io = BytesIO()
+    svg_io = StringIO()
 
-    dwg = svgwrite.Drawing(
-        svg_io,
-        size=(width, height),
-        viewBox=f"0 0 {width} {height}",
-        profile="tiny"
+dwg = svgwrite.Drawing(
+    svg_io,
+    size=(width, height),
+    viewBox=f"0 0 {width} {height}",
+    profile="tiny"
     )
 
     if include_preview_layer:
@@ -280,9 +280,11 @@ def build_svg(
         dwg.add(all_group)
 
     dwg.write(svg_io)
-    svg_io.seek(0)
 
-    return svg_io.getvalue(), skeleton_u8
+svg_text = svg_io.getvalue()
+svg_bytes = svg_text.encode("utf-8")
+
+return svg_bytes, skeleton_u8
 
 
 if uploaded_file:
