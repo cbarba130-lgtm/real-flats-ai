@@ -1,11 +1,8 @@
 import streamlit as st
 import cv2
 import numpy as np
-import svgwrite
-from skimage.morphology import skeletonize
-from scipy.ndimage import distance_transform_edt
-from io import BytesIO, StringIO
-from PIL import Image
+from io import BytesIO
+from PIL import Image, ImageOps
 
 APP_NAME = "Real Flats AI"
 TAGLINE = "Turn sketches into editable fashion flats."
@@ -16,8 +13,9 @@ st.title(APP_NAME)
 st.caption(TAGLINE)
 
 st.markdown("""
-**v0.1B Stable Mode**  
-This restores the first working editable-stroke approach, with slightly better filtering.
+**v0.5 Illustrator Prep Mode**  
+This version stops trying to perfectly auto-vectorize.  
+Instead, it creates clean Illustrator-ready prep files for faster tracing/redrawing.
 """)
 
 uploaded_file = st.file_uploader(
@@ -26,96 +24,54 @@ uploaded_file = st.file_uploader(
 )
 
 with st.sidebar:
-    st.header("Vector Settings")
+    st.header("Cleanup Settings")
 
-    threshold_mode = st.radio(
-        "Threshold mode",
-        ["Auto", "Manual"],
-        index=0
-    )
+    threshold_mode = st.radio("Threshold mode", ["Auto", "Manual"], index=0)
 
     manual_threshold = st.slider(
-        "Manual black/white threshold",
+        "Manual threshold",
         0,
         255,
-        165,
+        170,
         disabled=(threshold_mode == "Auto")
     )
 
-    speck_area = st.slider(
-        "Remove specks smaller than",
+    remove_specks = st.slider(
+        "Remove tiny specks smaller than",
         0,
-        500,
-        20
+        2000,
+        80
     )
 
-    smoothness = st.slider(
-        "Path smoothing",
-        0.0,
-        5.0,
+    line_boost = st.slider(
+        "Line darkness boost",
         1.0,
+        3.0,
+        1.4,
         0.1
     )
 
-    preserve_line_weights = st.checkbox(
-        "Preserve line-weight hierarchy",
-        value=True
-    )
-
-    min_stroke = st.slider(
-        "Minimum stroke weight",
-        0.25,
-        3.0,
-        0.5,
-        0.05
-    )
-
-    max_stroke = st.slider(
-        "Maximum stroke weight",
-        0.5,
-        8.0,
-        3.0,
-        0.05
-    )
-
-    remove_short_texture_paths = st.checkbox(
-        "Reduce tiny texture paths",
-        value=True
-    )
-
-    min_path_length = st.slider(
-        "Ignore paths shorter than",
-        0,
-        200,
-        8
-    )
-
-    st.divider()
-
-    separate_front_back = st.checkbox(
-        "Separate front/back into SVG groups",
-        value=True
-    )
-
-    include_preview_layer = st.checkbox(
-        "Include white background in SVG",
-        value=False
+    make_template_opacity = st.slider(
+        "Template opacity",
+        5,
+        80,
+        25
     )
 
 
-def load_grayscale(uploaded_bytes):
-    arr = np.frombuffer(uploaded_bytes, np.uint8)
-    img = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
-
-    if img is None:
-        pil_img = Image.open(BytesIO(uploaded_bytes)).convert("L")
-        img = np.array(pil_img)
-
-    return img
+def load_image(uploaded_bytes):
+    image = Image.open(BytesIO(uploaded_bytes)).convert("RGB")
+    return image
 
 
-def preprocess(img, threshold_mode, manual_threshold, speck_area):
-    blur = cv2.GaussianBlur(img, (3, 3), 0)
+def pil_to_cv_gray(pil_img):
+    arr = np.array(pil_img)
+    gray = cv2.cvtColor(arr, cv2.COLOR_RGB2GRAY)
+    return gray
+
+
+def clean_line_art(gray, threshold_mode, manual_threshold, remove_specks):
+    blur = cv2.GaussianBlur(gray, (3, 3), 0)
 
     if threshold_mode == "Auto":
         _, bw = cv2.threshold(
@@ -132,289 +88,140 @@ def preprocess(img, threshold_mode, manual_threshold, speck_area):
             cv2.THRESH_BINARY_INV
         )
 
-    if speck_area > 0:
+    if remove_specks > 0:
         num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(bw, 8)
         cleaned = np.zeros_like(bw)
 
         for i in range(1, num_labels):
             area = stats[i, cv2.CC_STAT_AREA]
-            if area >= speck_area:
+            if area >= remove_specks:
                 cleaned[labels == i] = 255
 
         bw = cleaned
 
-    return bw
+    # Convert back so black line art is black on white background
+    clean = 255 - bw
+    return clean
 
 
-def estimate_stroke_weight(
-    point,
-    distance_map,
-    min_stroke,
-    max_stroke,
-    preserve=True
-):
-    if not preserve:
-        return (min_stroke + max_stroke) / 2
-
-    x, y = int(point[0]), int(point[1])
-    height, width = distance_map.shape
-
-    if x < 0 or x >= width or y < 0 or y >= height:
-        return min_stroke
-
-    thickness_px = max(1.0, distance_map[y, x] * 2.0)
-
-    stroke = thickness_px * 0.45
-    stroke = float(np.clip(stroke, min_stroke, max_stroke))
-
-    return stroke
+def boost_lines(gray, boost):
+    arr = gray.astype(np.float32)
+    arr = 255 - ((255 - arr) * boost)
+    arr = np.clip(arr, 0, 255).astype(np.uint8)
+    return arr
 
 
-def contour_length(points):
-    if len(points) < 2:
-        return 0
+def make_template(clean_img, opacity_percent):
+    opacity = opacity_percent / 100.0
 
-    total = 0
+    # Light gray line art on white
+    template = clean_img.astype(np.float32)
+    template = 255 - ((255 - template) * opacity)
+    template = np.clip(template, 0, 255).astype(np.uint8)
 
-    for i in range(1, len(points)):
-        dx = points[i][0] - points[i - 1][0]
-        dy = points[i][1] - points[i - 1][1]
-        total += (dx ** 2 + dy ** 2) ** 0.5
-
-    return total
+    return template
 
 
-def should_skip_contour(points, min_path_length, reduce_texture):
-    if len(points) < 2:
-        return True
-
-    length = contour_length(points)
-
-    if reduce_texture and length < min_path_length:
-        return True
-
-    return False
+def png_bytes_from_array(arr):
+    pil_img = Image.fromarray(arr).convert("RGB")
+    out = BytesIO()
+    pil_img.save(out, format="PNG")
+    out.seek(0)
+    return out.getvalue()
 
 
-def contour_to_path(points):
-    if len(points) < 2:
-        return None
+def make_svg_template(clean_img, opacity_percent):
+    height, width = clean_img.shape
 
-    d = f"M {points[0][0]:.2f} {points[0][1]:.2f}"
+    # This SVG embeds the cleaned PNG as a tracing reference.
+    png_data = png_bytes_from_array(clean_img)
 
-    for point in points[1:]:
-        d += f" L {point[0]:.2f} {point[1]:.2f}"
+    import base64
+    encoded = base64.b64encode(png_data).decode("utf-8")
 
-    return d
+    opacity = opacity_percent / 100.0
 
-
-def split_front_back_groups(contours, width):
-    front = []
-    back = []
-    center = []
-
-    midpoint = width / 2
-
-    for contour in contours:
-        points = contour.squeeze()
-
-        if len(points.shape) != 2:
-            continue
-
-        x_mean = np.mean(points[:, 0])
-
-        if x_mean < midpoint * 0.92:
-            front.append(contour)
-        elif x_mean > midpoint * 1.08:
-            back.append(contour)
-        else:
-            center.append(contour)
-
-    return front, back, center
-
-
-def build_svg(
-    bw,
-    smoothness,
-    preserve_line_weights,
-    min_stroke,
-    max_stroke,
-    remove_short_texture_paths,
-    min_path_length,
-    separate_front_back=True,
-    include_preview_layer=False
-):
-    height, width = bw.shape
-
-    distance_map = distance_transform_edt(bw > 0)
-
-    skeleton = skeletonize(bw > 0)
-    skeleton_u8 = (skeleton * 255).astype(np.uint8)
-
-    contours, _ = cv2.findContours(
-        skeleton_u8,
-        cv2.RETR_LIST,
-        cv2.CHAIN_APPROX_NONE
-    )
-
-    svg_io = StringIO()
-
-    dwg = svgwrite.Drawing(
-        svg_io,
-        size=(width, height),
-        viewBox=f"0 0 {width} {height}",
-        profile="tiny"
-    )
-
-    if include_preview_layer:
-        bg = dwg.g(id="White_Background")
-        bg.add(
-            dwg.rect(
-                insert=(0, 0),
-                size=(width, height),
-                fill="white"
-            )
-        )
-        dwg.add(bg)
-
-    preview = np.zeros_like(skeleton_u8)
-
-    def add_contours_to_group(group, contour_list):
-        for contour in contour_list:
-            if len(contour) < 4:
-                continue
-
-            if smoothness > 0:
-                epsilon = (smoothness / 100.0) * cv2.arcLength(
-                    contour,
-                    False
-                )
-                approx = cv2.approxPolyDP(contour, epsilon, False)
-            else:
-                approx = contour
-
-            points = approx.squeeze()
-
-            if len(points.shape) != 2 or len(points) < 2:
-                continue
-
-            if should_skip_contour(
-                points,
-                min_path_length,
-                remove_short_texture_paths
-            ):
-                continue
-
-            path_data = contour_to_path(points)
-
-            if not path_data:
-                continue
-
-            mid_point = points[len(points) // 2]
-
-            stroke_width = estimate_stroke_weight(
-                mid_point,
-                distance_map,
-                min_stroke,
-                max_stroke,
-                preserve_line_weights
-            )
-
-            cv2.polylines(
-                preview,
-                [points.astype(np.int32).reshape((-1, 1, 2))],
-                False,
-                255,
-                1
-            )
-
-            group.add(
-                dwg.path(
-                    d=path_data,
-                    fill="none",
-                    stroke="black",
-                    stroke_width=stroke_width,
-                    stroke_linecap="round",
-                    stroke_linejoin="round"
-                )
-            )
-
-    if separate_front_back:
-        front, back, center = split_front_back_groups(contours, width)
-
-        front_group = dwg.g(id="Front_Flat")
-        back_group = dwg.g(id="Back_Flat")
-        center_group = dwg.g(id="Center_or_Unsorted_Details")
-
-        add_contours_to_group(front_group, front)
-        add_contours_to_group(back_group, back)
-        add_contours_to_group(center_group, center)
-
-        dwg.add(front_group)
-        dwg.add(back_group)
-
-        if center:
-            dwg.add(center_group)
-
-    else:
-        all_group = dwg.g(id="Editable_Stroke_Paths")
-        add_contours_to_group(all_group, contours)
-        dwg.add(all_group)
-
-    dwg.write(svg_io)
-
-    svg_text = svg_io.getvalue()
-    svg_bytes = svg_text.encode("utf-8")
-
-    return svg_bytes, skeleton_u8, preview
+    svg = f'''<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="{width}"
+     height="{height}"
+     viewBox="0 0 {width} {height}">
+  <g id="Locked_Template_Reference" opacity="{opacity}">
+    <image href="data:image/png;base64,{encoded}"
+           x="0"
+           y="0"
+           width="{width}"
+           height="{height}" />
+  </g>
+  <g id="Redraw_Layer">
+  </g>
+</svg>
+'''
+    return svg.encode("utf-8")
 
 
 if uploaded_file:
     file_bytes = uploaded_file.read()
-    img = load_grayscale(file_bytes)
 
-    bw = preprocess(
-        img,
+    original = load_image(file_bytes)
+    gray = pil_to_cv_gray(original)
+
+    boosted = boost_lines(gray, line_boost)
+
+    clean = clean_line_art(
+        boosted,
         threshold_mode,
         manual_threshold,
-        speck_area
+        remove_specks
     )
 
-    svg_bytes, skeleton_preview, filtered_preview = build_svg(
-        bw,
-        smoothness,
-        preserve_line_weights,
-        min_stroke,
-        max_stroke,
-        remove_short_texture_paths,
-        min_path_length,
-        separate_front_back,
-        include_preview_layer
-    )
+    template = make_template(clean, make_template_opacity)
+
+    clean_png = png_bytes_from_array(clean)
+    template_png = png_bytes_from_array(template)
+    svg_template = make_svg_template(clean, make_template_opacity)
 
     col1, col2, col3 = st.columns(3)
 
     with col1:
         st.subheader("Original")
-        st.image(img, clamp=True, use_column_width=True)
+        st.image(original, use_column_width=True)
 
     with col2:
-        st.subheader("Centerline Preview")
-        st.image(skeleton_preview, clamp=True, use_column_width=True)
+        st.subheader("Clean High-Contrast Art")
+        st.image(clean, clamp=True, use_column_width=True)
 
     with col3:
-        st.subheader("Filtered Export Preview")
-        st.image(filtered_preview, clamp=True, use_column_width=True)
+        st.subheader("Light Gray Illustrator Template")
+        st.image(template, clamp=True, use_column_width=True)
+
+    st.divider()
+
+    st.subheader("Downloads")
 
     st.download_button(
-        "Download Illustrator-Compatible SVG",
-        data=svg_bytes,
-        file_name="real_flats_ai_stable_export.svg",
+        "Download Clean PNG",
+        data=clean_png,
+        file_name="real_flats_ai_clean_art.png",
+        mime="image/png"
+    )
+
+    st.download_button(
+        "Download Light Gray Template PNG",
+        data=template_png,
+        file_name="real_flats_ai_template.png",
+        mime="image/png"
+    )
+
+    st.download_button(
+        "Download Illustrator Template SVG",
+        data=svg_template,
+        file_name="real_flats_ai_illustrator_template.svg",
         mime="image/svg+xml"
     )
 
     st.info(
-        "This version restores the first working approach. It should open in Illustrator as editable stroke paths, not filled objects."
+        "Recommended Illustrator workflow: Open the template SVG, lock the reference layer, redraw on the Redraw_Layer, then save as .AI."
     )
 
 else:
