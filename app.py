@@ -343,15 +343,15 @@ if uploaded_file:
 
     with col1:
         st.subheader("Original")
-        st.image(img, clamp=True, use_container_width=True)
+        st.image(img, clamp=True, use_column_width=True)
 
     with col2:
         st.subheader("Cleaned Line Art")
-        st.image(bw, clamp=True, use_container_width=True)
+        st.image(bw, clamp=True, use_column_width=True)
 
     with col3:
         st.subheader("Centerline Preview")
-        st.image(skeleton_preview, clamp=True, use_container_width=True)
+        st.image(skeleton_preview, clamp=True, use_column_width=True)
 
     st.download_button(
         "Download Illustrator-Compatible SVG",
