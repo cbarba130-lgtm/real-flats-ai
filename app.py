@@ -28,6 +28,11 @@ uploaded_file = st.file_uploader(
 with st.sidebar:
     st.header("Vector Settings")
 
+    clean_cad_mode = st.checkbox(
+        "Clean CAD Mode",
+        value=True
+    )
+
     threshold_mode = st.radio(
         "Threshold mode",
         ["Auto", "Manual"],
@@ -45,15 +50,22 @@ with st.sidebar:
     speck_area = st.slider(
         "Remove specks smaller than",
         0,
-        500,
-        20
+        1000,
+        40
+    )
+
+    min_path_length = st.slider(
+        "Ignore tiny paths shorter than",
+        0,
+        300,
+        45
     )
 
     smoothness = st.slider(
         "Path smoothing",
         0.0,
-        5.0,
-        1.0,
+        10.0,
+        2.5,
         0.1
     )
 
@@ -74,13 +86,13 @@ with st.sidebar:
         "Maximum stroke weight",
         0.5,
         8.0,
-        3.0,
+        2.25,
         0.05
     )
 
     remove_texture_details = st.checkbox(
         "Remove texture details",
-        value=False
+        value=True
     )
 
     st.divider()
@@ -107,7 +119,7 @@ def load_grayscale(uploaded_bytes):
     return img
 
 
-def preprocess(img, threshold_mode, manual_threshold, speck_area):
+def preprocess(img, threshold_mode, manual_threshold, speck_area, clean_cad_mode):
     blur = cv2.GaussianBlur(img, (3, 3), 0)
 
     if threshold_mode == "Auto":
@@ -125,6 +137,10 @@ def preprocess(img, threshold_mode, manual_threshold, speck_area):
             cv2.THRESH_BINARY_INV
         )
 
+    if clean_cad_mode:
+        kernel = np.ones((2, 2), np.uint8)
+        bw = cv2.morphologyEx(bw, cv2.MORPH_OPEN, kernel)
+
     if speck_area > 0:
         num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(bw, 8)
         cleaned = np.zeros_like(bw)
@@ -140,13 +156,7 @@ def preprocess(img, threshold_mode, manual_threshold, speck_area):
     return bw
 
 
-def estimate_stroke_weight(
-    point,
-    distance_map,
-    min_stroke,
-    max_stroke,
-    preserve=True
-):
+def estimate_stroke_weight(point, distance_map, min_stroke, max_stroke, preserve=True):
     if not preserve:
         return (min_stroke + max_stroke) / 2
 
@@ -158,7 +168,7 @@ def estimate_stroke_weight(
 
     thickness_px = max(1.0, distance_map[y, x] * 2.0)
 
-    stroke = thickness_px * 0.45
+    stroke = thickness_px * 0.4
     stroke = float(np.clip(stroke, min_stroke, max_stroke))
 
     return stroke
@@ -174,6 +184,28 @@ def contour_to_path(points):
         d += f" L {point[0]:.2f} {point[1]:.2f}"
 
     return d
+
+
+def should_skip_path(contour, min_path_length, remove_texture_details):
+    arc = cv2.arcLength(contour, False)
+
+    if arc < min_path_length:
+        return True
+
+    x, y, w, h = cv2.boundingRect(contour)
+
+    if remove_texture_details:
+        if h < 18 and w < 18:
+            return True
+
+        if h > 0 and w > 0:
+            aspect = max(w / h, h / w)
+
+            # Removes many tiny hatch/texture marks without removing major seams.
+            if aspect > 5 and arc < 90:
+                return True
+
+    return False
 
 
 def split_front_back_groups(contours, width):
@@ -207,6 +239,8 @@ def build_svg(
     preserve_line_weights,
     min_stroke,
     max_stroke,
+    min_path_length,
+    remove_texture_details,
     separate_front_back=True,
     include_preview_layer=False
 ):
@@ -222,6 +256,15 @@ def build_svg(
         cv2.RETR_LIST,
         cv2.CHAIN_APPROX_NONE
     )
+
+    filtered_contours = []
+
+    for contour in contours:
+        if not should_skip_path(contour, min_path_length, remove_texture_details):
+            filtered_contours.append(contour)
+
+    preview = np.zeros_like(skeleton_u8)
+    cv2.drawContours(preview, filtered_contours, -1, 255, 1)
 
     svg_io = StringIO()
 
@@ -249,10 +292,7 @@ def build_svg(
                 continue
 
             if smoothness > 0:
-                epsilon = (smoothness / 100.0) * cv2.arcLength(
-                    contour,
-                    False
-                )
+                epsilon = (smoothness / 100.0) * cv2.arcLength(contour, False)
                 approx = cv2.approxPolyDP(contour, epsilon, False)
             else:
                 approx = contour
@@ -289,7 +329,7 @@ def build_svg(
             )
 
     if separate_front_back:
-        front, back, center = split_front_back_groups(contours, width)
+        front, back, center = split_front_back_groups(filtered_contours, width)
 
         front_group = dwg.g(id="Front_Flat")
         back_group = dwg.g(id="Back_Flat")
@@ -307,7 +347,7 @@ def build_svg(
 
     else:
         all_group = dwg.g(id="Editable_Stroke_Paths")
-        add_contours_to_group(all_group, contours)
+        add_contours_to_group(all_group, filtered_contours)
         dwg.add(all_group)
 
     dwg.write(svg_io)
@@ -315,7 +355,7 @@ def build_svg(
     svg_text = svg_io.getvalue()
     svg_bytes = svg_text.encode("utf-8")
 
-    return svg_bytes, skeleton_u8
+    return svg_bytes, preview
 
 
 if uploaded_file:
@@ -326,15 +366,18 @@ if uploaded_file:
         img,
         threshold_mode,
         manual_threshold,
-        speck_area
+        speck_area,
+        clean_cad_mode
     )
 
-    svg_bytes, skeleton_preview = build_svg(
+    svg_bytes, clean_preview = build_svg(
         bw,
         smoothness,
         preserve_line_weights,
         min_stroke,
         max_stroke,
+        min_path_length,
+        remove_texture_details,
         separate_front_back,
         include_preview_layer
     )
@@ -350,13 +393,13 @@ if uploaded_file:
         st.image(bw, clamp=True, use_column_width=True)
 
     with col3:
-        st.subheader("Centerline Preview")
-        st.image(skeleton_preview, clamp=True, use_column_width=True)
+        st.subheader("Clean CAD Preview")
+        st.image(clean_preview, clamp=True, use_column_width=True)
 
     st.download_button(
         "Download Illustrator-Compatible SVG",
         data=svg_bytes,
-        file_name="real_flats_ai_export.svg",
+        file_name="real_flats_ai_clean_cad_export.svg",
         mime="image/svg+xml"
     )
 
