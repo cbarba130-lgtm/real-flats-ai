@@ -31,8 +31,7 @@ with st.sidebar:
     threshold_mode = st.radio(
         "Threshold mode",
         ["Auto", "Manual"],
-        index=0,
-        help="Auto usually works best for clean CAD flats."
+        index=0
     )
 
     manual_threshold = st.slider(
@@ -47,8 +46,7 @@ with st.sidebar:
         "Remove specks smaller than",
         0,
         500,
-        20,
-        help="Higher removes more tiny marks. Use low values if stitch dots disappear."
+        20
     )
 
     smoothness = st.slider(
@@ -56,8 +54,7 @@ with st.sidebar:
         0.0,
         5.0,
         1.0,
-        0.1,
-        help="Higher creates simpler paths but may reduce detail."
+        0.1
     )
 
     preserve_line_weights = st.checkbox(
@@ -70,28 +67,34 @@ with st.sidebar:
 
     remove_texture_details = st.checkbox(
         "Remove texture details",
-        value=False,
-        help="Experimental. For v0.1, use speck removal to reduce small texture marks."
+        value=False
     )
 
     st.divider()
 
-    st.write("Output")
-    separate_front_back = st.checkbox("Separate front/back into SVG groups", value=True)
-    include_preview_layer = st.checkbox("Include white background in SVG", value=False)
+    separate_front_back = st.checkbox(
+        "Separate front/back into SVG groups",
+        value=True
+    )
+
+    include_preview_layer = st.checkbox(
+        "Include white background in SVG",
+        value=False
+    )
 
 
 def load_grayscale(uploaded_bytes):
     arr = np.frombuffer(uploaded_bytes, np.uint8)
     img = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
+
     if img is None:
         pil_img = Image.open(BytesIO(uploaded_bytes)).convert("L")
         img = np.array(pil_img)
+
     return img
 
 
 def preprocess(img, threshold_mode, manual_threshold, speck_area):
-    # Light blur helps eliminate JPEG fuzz without destroying CAD linework
     blur = cv2.GaussianBlur(img, (3, 3), 0)
 
     if threshold_mode == "Auto":
@@ -109,14 +112,15 @@ def preprocess(img, threshold_mode, manual_threshold, speck_area):
             cv2.THRESH_BINARY_INV
         )
 
-    # Remove tiny connected components
     if speck_area > 0:
         num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(bw, 8)
         cleaned = np.zeros_like(bw)
+
         for i in range(1, num_labels):
             area = stats[i, cv2.CC_STAT_AREA]
             if area >= speck_area:
                 cleaned[labels == i] = 255
+
         bw = cleaned
 
     return bw
@@ -127,17 +131,17 @@ def estimate_stroke_weight(point, distance_map, min_stroke, max_stroke, preserve
         return (min_stroke + max_stroke) / 2
 
     x, y = int(point[0]), int(point[1])
-    h, w = distance_map.shape
-    if x < 0 or x >= w or y < 0 or y >= h:
+    height, width = distance_map.shape
+
+    if x < 0 or x >= width or y < 0 or y >= height:
         return min_stroke
 
-    # Distance to nearest background approximates half the original line thickness.
     thickness_px = max(1.0, distance_map[y, x] * 2.0)
 
-    # Map pixel thickness into Illustrator-friendly stroke range.
-    # This preserves hierarchy more than exact physical point size.
     stroke = thickness_px * 0.45
-    return float(np.clip(stroke, min_stroke, max_stroke))
+    stroke = float(np.clip(stroke, min_stroke, max_stroke))
+
+    return stroke
 
 
 def contour_to_path(points):
@@ -145,22 +149,28 @@ def contour_to_path(points):
         return None
 
     d = f"M {points[0][0]:.2f} {points[0][1]:.2f}"
-    for p in points[1:]:
-        d += f" L {p[0]:.2f} {p[1]:.2f}"
+
+    for point in points[1:]:
+        d += f" L {point[0]:.2f} {point[1]:.2f}"
+
     return d
 
 
 def split_front_back_groups(contours, width):
-    # Simple v0.1 grouping: paths left of center = Front, paths right of center = Back.
-    # This is intentionally transparent and easy to improve later.
-    front, back, center = [], [], []
+    front = []
+    back = []
+    center = []
+
     midpoint = width / 2
 
     for contour in contours:
-        pts = contour.squeeze()
-        if len(pts.shape) != 2:
+        points = contour.squeeze()
+
+        if len(points.shape) != 2:
             continue
-        x_mean = np.mean(pts[:, 0])
+
+        x_mean = np.mean(points[:, 0])
+
         if x_mean < midpoint * 0.92:
             front.append(contour)
         elif x_mean > midpoint * 1.08:
@@ -171,14 +181,19 @@ def split_front_back_groups(contours, width):
     return front, back, center
 
 
-def build_svg(img, bw, smoothness, preserve_line_weights, min_stroke, max_stroke,
-              separate_front_back=True, include_preview_layer=False):
-    h, w = bw.shape
+def build_svg(
+    bw,
+    smoothness,
+    preserve_line_weights,
+    min_stroke,
+    max_stroke,
+    separate_front_back=True,
+    include_preview_layer=False
+):
+    height, width = bw.shape
 
-    # Distance map from original binary line art, used to estimate local line thickness.
     distance_map = distance_transform_edt(bw > 0)
 
-    # Centerline skeleton
     skeleton = skeletonize(bw > 0)
     skeleton_u8 = (skeleton * 255).astype(np.uint8)
 
@@ -189,20 +204,17 @@ def build_svg(img, bw, smoothness, preserve_line_weights, min_stroke, max_stroke
     )
 
     svg_io = BytesIO()
+
     dwg = svgwrite.Drawing(
         svg_io,
-        size=(w, h),
-        viewBox=f"0 0 {w} {h}",
+        size=(width, height),
+        viewBox=f"0 0 {width} {height}",
         profile="tiny"
     )
 
-    dwg.add(dwg.desc(
-        "Generated by Real Flats AI v0.1. Editable stroke paths. Fill set to none."
-    ))
-
     if include_preview_layer:
         bg = dwg.g(id="White_Background")
-        bg.add(dwg.rect(insert=(0, 0), size=(w, h), fill="white"))
+        bg.add(dwg.rect(insert=(0, 0), size=(width, height), fill="white"))
         dwg.add(bg)
 
     def add_contours_to_group(group, contour_list):
@@ -210,18 +222,24 @@ def build_svg(img, bw, smoothness, preserve_line_weights, min_stroke, max_stroke
             if len(contour) < 4:
                 continue
 
-            epsilon = (smoothness / 100.0) * cv2.arcLength(contour, False)
-            approx = cv2.approxPolyDP(contour, epsilon, False) if smoothness > 0 else contour
+            if smoothness > 0:
+                epsilon = (smoothness / 100.0) * cv2.arcLength(contour, False)
+                approx = cv2.approxPolyDP(contour, epsilon, False)
+            else:
+                approx = contour
+
             points = approx.squeeze()
 
             if len(points.shape) != 2 or len(points) < 2:
                 continue
 
-            d = contour_to_path(points)
-            if not d:
+            path_data = contour_to_path(points)
+
+            if not path_data:
                 continue
 
             mid_point = points[len(points) // 2]
+
             stroke_width = estimate_stroke_weight(
                 mid_point,
                 distance_map,
@@ -231,7 +249,7 @@ def build_svg(img, bw, smoothness, preserve_line_weights, min_stroke, max_stroke
             )
 
             group.add(dwg.path(
-                d=d,
+                d=path_data,
                 fill="none",
                 stroke="black",
                 stroke_width=stroke_width,
@@ -240,24 +258,26 @@ def build_svg(img, bw, smoothness, preserve_line_weights, min_stroke, max_stroke
             ))
 
     if separate_front_back:
-        front, back, center = split_front_back_groups(contours, w)
+        front, back, center = split_front_back_groups(contours, width)
 
-        g_front = dwg.g(id="Front_Flat")
-        g_back = dwg.g(id="Back_Flat")
-        g_details = dwg.g(id="Center_or_Unsorted_Details")
+        front_group = dwg.g(id="Front_Flat")
+        back_group = dwg.g(id="Back_Flat")
+        center_group = dwg.g(id="Center_or_Unsorted_Details")
 
-        add_contours_to_group(g_front, front)
-        add_contours_to_group(g_back, back)
-        add_contours_to_group(g_details, center)
+        add_contours_to_group(front_group, front)
+        add_contours_to_group(back_group, back)
+        add_contours_to_group(center_group, center)
 
-        dwg.add(g_front)
-        dwg.add(g_back)
+        dwg.add(front_group)
+        dwg.add(back_group)
+
         if center:
-            dwg.add(g_details)
+            dwg.add(center_group)
+
     else:
-        g_all = dwg.g(id="Editable_Stroke_Paths")
-        add_contours_to_group(g_all, contours)
-        dwg.add(g_all)
+        all_group = dwg.g(id="Editable_Stroke_Paths")
+        add_contours_to_group(all_group, contours)
+        dwg.add(all_group)
 
     dwg.write(svg_io)
     svg_io.seek(0)
@@ -277,7 +297,6 @@ if uploaded_file:
     )
 
     svg_bytes, skeleton_preview = build_svg(
-        img,
         bw,
         smoothness,
         preserve_line_weights,
@@ -309,8 +328,7 @@ if uploaded_file:
     )
 
     st.info(
-        "Open the SVG in Illustrator. Lines should come in as editable paths with Fill=None and Stroke=black. "
-        "Then save as .AI from Illustrator."
+        "Open the SVG in Illustrator. Lines should come in as editable paths with Fill=None and Stroke=black. Then save as .AI from Illustrator."
     )
 
 else:
